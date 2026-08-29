@@ -75,6 +75,10 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
 .route-bar-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;}
 .route-dest{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .route-dest span{color:var(--amber);}
+.dump-stops-row{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.dump-stops-btn{background:var(--amber-ghost);color:var(--amber);border:1px solid rgba(255,184,48,.25);border-radius:10px;padding:7px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;}
+.dump-via-active{font-size:11px;color:var(--amber);background:var(--amber-ghost);border-radius:10px;padding:6px 10px;display:flex;align-items:center;gap:7px;}
+.dump-via-clear{cursor:pointer;opacity:.7;}
 .route-cancel{font-size:10px;color:var(--text-dim);background:rgba(255,255,255,.07);padding:4px 9px;border-radius:9px;cursor:pointer;flex-shrink:0;}
 .route-stats{display:flex;gap:14px;}
 .rs-item{display:flex;flex-direction:column;}
@@ -407,8 +411,8 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
     </div>
     <div class="haul-options" id="haul-options">
       <div class="haul-note">
-        <div class="haul-note-icon">⚠️</div>
-        <div class="haul-note-text">Long Haul mode is for full-trip planning. Gap warnings and vehicle-specific filters aren't built yet — flagged as an open item, not faked here.</div>
+        <div class="haul-note-icon">🛻</div>
+        <div class="haul-note-text">Long Haul mode finds real RV dump points along your route (nationwide government data) and can route you via one, with a revised ETA. Gap warnings and vehicle-specific filters still aren't built — flagged as an open item, not faked here.</div>
       </div>
       <div class="field-group" style="padding:0;">
         <div class="field-label">Requirements</div>
@@ -436,6 +440,17 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
 </div>
 
 <!-- MODAL: NEARBY LIST -->
+<div class="modal-overlay" id="dump-modal">
+  <div class="modal-sheet">
+    <div class="sheet-handle"></div>
+    <div class="section-div">
+      <div class="section-div-title">Dump Points Along Your Route</div>
+      <div class="section-div-count" id="dumpModalCount">— found</div>
+    </div>
+    <div class="scroll-area"><div id="dump-point-list"></div></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="list-modal">
   <div class="modal-sheet">
     <div class="sheet-handle"></div>
@@ -508,6 +523,10 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
     <div class="route-stats">
       <div class="rs-item"><div class="rs-val" id="routeKm">—</div><div class="rs-key">Distance</div></div>
       <div class="rs-item"><div class="rs-val" id="routeMin">—</div><div class="rs-key">Est. time</div></div>
+    </div>
+    <div class="dump-stops-row" id="dumpStopsRow" style="display:none;">
+      <button class="dump-stops-btn" id="dumpStopsBtn" onclick="openModal('dump-modal')">🛻 <span id="dumpStopsCount">0</span> dump points along this route</button>
+      <div class="dump-via-active" id="dumpViaActive" style="display:none;">🛻 Via <span id="dumpViaLabel"></span><span class="dump-via-clear" onclick="clearViaStop()">✕</span></div>
     </div>
   </div>
 
@@ -629,6 +648,7 @@ let navMenuOpen=false;
 let markers=[];
 let currentAvatar=0,currentMode='quick';
 let activeDestination=null,destMarker=null,destLine=null;
+let GOV_DUMPPOINTS=null,dumpStops=[];
 
 /* MAPBOX — Directions v5 + Geocoding v6. Same public token already used by Chasin' Curves. */
 const MAPBOX_TOKEN='pk.eyJ1Ijoic2N2ZCIsImEiOiJjbXRkcm41aWMwOWU2MnpwdGlodnVsNnhrIn0.tyhIKA6GZb71MVPRb5D25w'; // URL-restricted to scvd-app.github.io
@@ -655,6 +675,128 @@ function fetchRoute(points,profile='driving-traffic'){
         steps:(route.legs||[]).flatMap(l=>l.steps||[])
       };
     });
+}
+
+/**
+ * Dump points — Long Haul mode. Nationwide RV dump point data (1,393 sites) filtered from the
+ * same National Public Toilet Map CSV (data.gov.au, CC-BY 3.0 AU) the toilet facilities already
+ * use — DumpPoint=true records, with the DPWashout/DPAfterHours/DrinkingWater flags carried
+ * through. Loaded lazily (dumppoints.json, ~360KB) only when Long Haul mode is actually used,
+ * so Quick Dash users never pay for it.
+ */
+function loadDumpPoints(){
+  if(GOV_DUMPPOINTS)return Promise.resolve(GOV_DUMPPOINTS);
+  return fetch('dumppoints.json')
+    .then(r=>{if(!r.ok)throw new Error('dump point data request failed');return r.json();})
+    .then(data=>{GOV_DUMPPOINTS=data;return data;});
+}
+
+/**
+ * Corridor search — which dump points sit within corridorKm of the planned route, in the order
+ * you'll pass them (tripKm = distance into the trip; offRouteKm = detour off the route line).
+ * A bounding-box prefilter (cheap) narrows the 1,393 nationwide candidates down before the more
+ * expensive point-to-route check; the route geometry itself is sampled (capped ~800 points) since
+ * a long interstate route can have thousands of coordinate pairs and sub-km precision isn't needed
+ * against an 8km-wide corridor.
+ */
+function findDumpPointsAlongRoute(coords,corridorKm=8,maxResults=20){
+  if(!coords||!coords.length||!GOV_DUMPPOINTS)return [];
+  const step=Math.max(1,Math.floor(coords.length/800));
+  const sampled=[];
+  let cum=0,minLat=90,maxLat=-90,minLng=180,maxLng=-180;
+  for(let i=0;i<coords.length;i+=step){
+    const lat=coords[i][1],lng=coords[i][0];
+    if(sampled.length)cum+=haversine(sampled[sampled.length-1].lat,sampled[sampled.length-1].lng,lat,lng);
+    sampled.push({lat,lng,cum});
+    if(lat<minLat)minLat=lat;if(lat>maxLat)maxLat=lat;
+    if(lng<minLng)minLng=lng;if(lng>maxLng)maxLng=lng;
+  }
+  const buf=corridorKm/111; // rough degrees-per-km — a prefilter, not the actual distance check
+  const candidates=GOV_DUMPPOINTS.filter(dp=>dp.lat>=minLat-buf&&dp.lat<=maxLat+buf&&dp.lng>=minLng-buf&&dp.lng<=maxLng+buf);
+  const hits=[];
+  for(const dp of candidates){
+    let minDist=Infinity,minCum=0;
+    for(const s of sampled){
+      const d=haversine(dp.lat,dp.lng,s.lat,s.lng);
+      if(d<minDist){minDist=d;minCum=s.cum;}
+    }
+    if(minDist<=corridorKm)hits.push({...dp,offRouteKm:minDist,tripKm:minCum});
+  }
+  hits.sort((a,b)=>a.tripKm-b.tripKm);
+  return hits.slice(0,maxResults);
+}
+
+/* Runs the corridor search once a Long Haul route's geometry is in, and refreshes the pill/button. */
+function planDumpStops(dest,geometry){
+  loadDumpPoints().then(()=>{
+    if(activeDestination!==dest)return; // destination changed while the data was loading
+    dumpStops=findDumpPointsAlongRoute(geometry.coordinates);
+    renderDumpStopsButton();
+  }).catch(()=>{ /* dump point data unavailable — the Long Haul route itself still works fine */ });
+}
+
+function renderDumpStopsButton(){
+  const row=document.getElementById('dumpStopsRow');
+  if(!row)return;
+  if(!activeDestination||!activeDestination.longHaul||!dumpStops.length){
+    row.style.display='none';
+    return;
+  }
+  row.style.display='flex';
+  document.getElementById('dumpStopsCount').textContent=dumpStops.length;
+  const viaBtn=document.getElementById('dumpStopsBtn'),viaBox=document.getElementById('dumpViaActive');
+  if(activeDestination.viaStop){
+    viaBtn.style.display='none';
+    viaBox.style.display='flex';
+    document.getElementById('dumpViaLabel').textContent=activeDestination.viaStop.label;
+  } else {
+    viaBtn.style.display='';
+    viaBox.style.display='none';
+  }
+}
+
+function buildDumpList(){
+  document.getElementById('dumpModalCount').textContent=dumpStops.length+' found';
+  document.getElementById('dump-point-list').innerHTML=dumpStops.map(dp=>`
+    <div class="facility-item" onclick="useDumpStop(${dp.id})">
+      <div class="fi-icon" style="background:var(--amber-ghost);">🛻</div>
+      <div class="fi-info">
+        <div class="fi-name">${dp.name}</div>
+        <div class="fi-address">${dp.addr}</div>
+        <div class="fi-pills">
+          <span class="pill ${dp.h24?'pill-green':'pill-amber'}">${dp.h24?'Open 24hr':dp.hours}</span>
+          ${dp.washout?'<span class="pill pill-teal">🚿 Washout</span>':''}
+          ${dp.afterHours?'<span class="pill pill-purple">🌙 After hours</span>':''}
+          ${dp.water?'<span class="pill pill-teal">💧 Water</span>':''}
+        </div>
+      </div>
+      <div class="fi-right">
+        <div class="fi-dist">${dp.tripKm.toFixed(0)}<span class="fi-unit"> km in</span></div>
+        <div class="fi-time">+${dp.offRouteKm.toFixed(1)} km off-route</div>
+      </div>
+    </div>`).join('');
+}
+
+function persistDestination(){
+  if(!activeDestination)return;
+  try{localStorage.setItem('gottago_destination',JSON.stringify(activeDestination));}catch(e){}
+}
+
+function useDumpStop(id){
+  const dp=dumpStops.find(d=>d.id===id);
+  if(!dp||!activeDestination)return;
+  activeDestination.viaStop={lat:dp.lat,lng:dp.lng,label:dp.name};
+  persistDestination();
+  closeAllModals();
+  toast(`🛻 Routing via ${dp.name}`);
+  refreshDirectRoute();
+}
+function clearViaStop(){
+  if(!activeDestination||!activeDestination.viaStop)return;
+  delete activeDestination.viaStop;
+  persistDestination();
+  toast('Dump stop cleared');
+  refreshDirectRoute();
 }
 
 function haversine(a,b,c,d){const R=6371,dL=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;const x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dl/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
@@ -968,19 +1110,23 @@ function drawRouteLine(geometry){
 function refreshDirectRoute(){
   if(!activeDestination||!userLat)return;
   const dest=activeDestination;
-  fetchRoute([{lat:userLat,lng:userLng},{lat:dest.lat,lng:dest.lng}])
+  const pts=[{lat:userLat,lng:userLng}];
+  if(dest.viaStop)pts.push(dest.viaStop); // Long Haul dump stop, routed as a real waypoint
+  pts.push({lat:dest.lat,lng:dest.lng});
+  fetchRoute(pts)
     .then(route=>{
       if(activeDestination!==dest)return; // destination changed/cleared while this was in flight
       dest.routedKm=route.distanceKm;
       dest.routedMin=route.durationMin;
       drawRouteLine(route.geometry);
       updateRouteBar();
+      if(dest.longHaul)planDumpStops(dest,route.geometry);
     })
     .catch(()=>{ /* stay on the haversine estimate already shown by updateRouteBar() */ });
 }
 function updateRouteBar(){
   if(!activeDestination||!userLat)return;
-  document.getElementById('routeDestLabel').textContent=activeDestination.label;
+  document.getElementById('routeDestLabel').textContent=activeDestination.viaStop?activeDestination.label+' · via '+activeDestination.viaStop.label:activeDestination.label;
   if(activeDestination.routedKm!=null){
     document.getElementById('routeKm').textContent=activeDestination.routedKm.toFixed(0)+' km';
     document.getElementById('routeMin').textContent=Math.round(activeDestination.routedMin)+' min';
@@ -1025,6 +1171,7 @@ function startRoute(){
     done=true;clearInterval(iv);
     fill.style.width='100%';
     items.forEach(id=>document.getElementById(id).classList.add('done'));
+    dest.longHaul=(currentMode==='haul');
     setTimeout(()=>{
       overlay.classList.remove('show');
       setDestination(dest);
@@ -1098,6 +1245,7 @@ function selectAvatar(idx){
 /* MODALS (generic) */
 function openModal(id){
   if(id==='list-modal')buildFacilityList();
+  if(id==='dump-modal')buildDumpList();
   document.querySelectorAll('.modal-overlay').forEach(m=>m.classList.remove('open'));
   document.getElementById(id).classList.add('open');
 }
