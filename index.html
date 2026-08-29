@@ -630,6 +630,33 @@ let markers=[];
 let currentAvatar=0,currentMode='quick';
 let activeDestination=null,destMarker=null,destLine=null;
 
+/* MAPBOX — Directions v5 + Geocoding v6. Same public token already used by Chasin' Curves. */
+const MAPBOX_TOKEN='pk.eyJ1Ijoic2N2ZCIsImEiOiJjbXMzOHB1eXUwMzRjMzVvYm0ya29wYTZ1In0.FlTd5i3zPj5W7E57UaH5gw';
+function mbCoord(lat,lng){return lng+','+lat;}
+
+/**
+ * Fetch a real routed leg from Mapbox Directions. points: array of {lat,lng}, 2-25 of them.
+ * Returns {distanceKm, durationMin, durationTypicalMin, geometry, steps} from the first route,
+ * or throws on failure — callers should catch and fall back to the haversine estimate.
+ */
+function fetchRoute(points,profile='driving-traffic'){
+  const coordStr=points.map(p=>mbCoord(p.lat,p.lng)).join(';');
+  const url=`https://api.mapbox.com/directions/v5/mapbox/${profile}/${coordStr}?geometries=geojson&overview=full&steps=true&access_token=${MAPBOX_TOKEN}`;
+  return fetch(url)
+    .then(r=>{if(!r.ok)throw new Error('directions request failed');return r.json();})
+    .then(data=>{
+      if(!data.routes||!data.routes.length)throw new Error('no route found');
+      const route=data.routes[0];
+      return {
+        distanceKm:route.distance/1000,
+        durationMin:route.duration/60,
+        durationTypicalMin:(route.duration_typical!=null?route.duration_typical:route.duration)/60,
+        geometry:route.geometry,
+        steps:(route.legs||[]).flatMap(l=>l.steps||[])
+      };
+    });
+}
+
 function haversine(a,b,c,d){const R=6371,dL=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;const x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dl/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
 function estMinutes(km){return Math.max(1,Math.round(km*1.5));}
 function lordsLabel(stars){if(stars>=5)return '🏛️ House of Lords';if(stars===4)return '👑 Throne Room';if(stars===3)return '🚻 The Loo';if(stars===2)return '⛽ Servo Stop';return '⚠️ Thunderbox';}
@@ -647,13 +674,17 @@ function onGPS(p){
   document.getElementById('gpsDot').className='gps-dot locked';
   document.getElementById('gpsText').innerHTML=`<strong>GPS Locked</strong> · ${userLat.toFixed(5)}, ${userLng.toFixed(5)}`;
   document.getElementById('gpsAcc').textContent=`±${acc}m`;
-  if(map){
-    map.setView([userLat,userLng],map.getZoom());
-    if(userMarker)userMarker.setLatLng([userLat,userLng]);
-    else userMarker=L.marker([userLat,userLng],{icon:L.divIcon({className:'',html:`<div style="width:14px;height:14px;background:#FFB830;border:3px solid white;border-radius:50%;box-shadow:0 0 10px rgba(255,184,48,.8);"></div>`,iconSize:[14,14],iconAnchor:[7,7]})}).addTo(map);
-    updateDistances();updateNearestCard();
-    if(activeDestination)updateRouteBar();
+  if(!map){
+    // First real GPS fix — the map is never created before now on this path (initMap()
+    // used to only be called from startDemo()), so a real device previously showed no map at all.
+    initMap();
+    return;
   }
+  map.setView([userLat,userLng],map.getZoom());
+  if(userMarker)userMarker.setLatLng([userLat,userLng]);
+  else userMarker=L.marker([userLat,userLng],{icon:L.divIcon({className:'',html:`<div style="width:14px;height:14px;background:#FFB830;border:3px solid white;border-radius:50%;box-shadow:0 0 10px rgba(255,184,48,.8);"></div>`,iconSize:[14,14],iconAnchor:[7,7]})}).addTo(map);
+  updateDistances();updateNearestCard();
+  if(activeDestination)updateRouteBar();
 }
 function onGPSErr(){document.getElementById('gpsDot').className='gps-dot error';startDemo();}
 function startDemo(){
@@ -831,7 +862,7 @@ function openDetail(f){
     const legKm=haversine(userLat,userLng,f.lat,f.lng)+haversine(f.lat,f.lng,activeDestination.lat,activeDestination.lng);
     const deltaKm=Math.max(0,legKm-directKm);
     const deltaMin=estMinutes(deltaKm);
-    diversionHtml=`<div class="ds-diversion">🧭 Continuing to <strong>${activeDestination.label}</strong> — this stop adds ~${deltaKm.toFixed(1)} km / ~${deltaMin} min to your trip (straight-line estimate — real road ETA is a phase-2 build item, see handoff).</div>`;
+    diversionHtml=`<div class="ds-diversion" id="diversionBox">🧭 Continuing to <strong>${activeDestination.label}</strong> — this stop adds ~${deltaKm.toFixed(1)} km / ~${deltaMin} min to your trip <span style="opacity:.6;">(estimating real road time…)</span></div>`;
     navUrl=`https://www.google.com/maps/dir/?api=1&origin=${userLat},${userLng}&destination=${activeDestination.lat},${activeDestination.lng}&waypoints=${f.lat},${f.lng}&travelmode=driving`;
   }
 
@@ -858,19 +889,42 @@ function openDetail(f){
     <button class="ds-go" onclick="window.open('${navUrl}','_blank');closeDetail()">▶ ${activeDestination?'Navigate — keeps your destination':'Navigate Here'}</button>
     <button class="ds-rep" onclick="closeDetail()">📝 Report an Update · Close</button>`;
   document.getElementById('detailOverlay').classList.add('open');
+
+  if(activeDestination&&userLat){
+    // Real routed diversion delta — replaces the straight-line estimate above once it lands.
+    // Two fresh Directions calls (direct leg, diversion-via-facility leg) every time the sheet
+    // opens; deliberately not cached/reused, this only fires on a user tap, not per GPS tick.
+    const dest=activeDestination;
+    Promise.all([
+      fetchRoute([{lat:userLat,lng:userLng},{lat:dest.lat,lng:dest.lng}]),
+      fetchRoute([{lat:userLat,lng:userLng},{lat:f.lat,lng:f.lng},{lat:dest.lat,lng:dest.lng}])
+    ]).then(([direct,diversion])=>{
+      if(activeDestination!==dest)return; // destination changed/cleared while this was loading
+      const box=document.getElementById('diversionBox');
+      if(!box)return; // sheet was closed or replaced already
+      const deltaKm=Math.max(0,diversion.distanceKm-direct.distanceKm);
+      const deltaMin=Math.max(0,Math.round(diversion.durationMin-direct.durationMin));
+      box.innerHTML=`🧭 Continuing to <strong>${dest.label}</strong> — this stop adds ~${deltaKm.toFixed(1)} km / ~${deltaMin} min to your trip (real road routing, live traffic).`;
+    }).catch(()=>{
+      const box=document.getElementById('diversionBox');
+      if(box)box.innerHTML=box.innerHTML.replace('(estimating real road time…)','(straight-line estimate — could not reach live routing)');
+    });
+  }
 }
 function closeDetail(){document.getElementById('detailOverlay').classList.remove('open');}
 
 /* DESTINATION / ROUTE STATE — the "own the destination" foundation for the waypoint feature */
 function geocodeDestination(query){
-  // Nominatim (OSM) — free, no key, fine for dev/beta volume. Swap for Mapbox Geocoding
-  // when the Directions API integration lands (same vendor, same API key, higher rate limits).
-  return fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=au&q='+encodeURIComponent(query))
+  // Mapbox Geocoding v6 — same vendor/token as the Directions calls below.
+  const url=`https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(query)}&country=au&limit=1&access_token=${MAPBOX_TOKEN}`;
+  return fetch(url)
     .then(r=>{if(!r.ok)throw new Error('geocode request failed');return r.json();})
     .then(data=>{
-      if(!data.length)throw new Error('not found');
-      const label=data[0].display_name.split(',').slice(0,3).join(',').trim();
-      return {label,lat:parseFloat(data[0].lat),lng:parseFloat(data[0].lon)};
+      const f=data.features&&data.features[0];
+      if(!f)throw new Error('not found');
+      const [lng,lat]=f.geometry.coordinates;
+      const label=f.properties.name||query;
+      return {label,lat,lng};
     });
 }
 
@@ -896,16 +950,45 @@ function renderDestination(){
   if(destMarker)map.removeLayer(destMarker);
   if(destLine)map.removeLayer(destLine);
   destMarker=L.marker([activeDestination.lat,activeDestination.lng],{icon:L.divIcon({className:'',html:`<div style="width:16px;height:16px;background:#FFB830;border:3px solid white;border-radius:4px;box-shadow:0 0 10px rgba(255,184,48,.8);"></div>`,iconSize:[16,16],iconAnchor:[8,8]})}).addTo(map);
+  // Straight dashed line first for instant feedback — refreshDirectRoute() below swaps it for
+  // the real routed geometry as soon as Directions responds (or leaves this up on failure).
   destLine=L.polyline([[userLat,userLng],[activeDestination.lat,activeDestination.lng]],{color:'#FFB830',weight:2.5,opacity:.55,dashArray:'2 8'}).addTo(map);
   document.getElementById('routeBar').style.display='';
   updateRouteBar();
+  refreshDirectRoute();
+}
+function drawRouteLine(geometry){
+  if(!map)return;
+  if(destLine)map.removeLayer(destLine);
+  destLine=L.geoJSON(geometry,{style:{color:'#FFB830',weight:4,opacity:.75}}).addTo(map);
+}
+/* Real routed distance/time for the direct user→destination leg — fetched once per
+   destination set/restore, never on every GPS tick, to keep Directions API usage in check
+   (see gottago-relocation-scope.md). Falls back to the haversine estimate on failure. */
+function refreshDirectRoute(){
+  if(!activeDestination||!userLat)return;
+  const dest=activeDestination;
+  fetchRoute([{lat:userLat,lng:userLng},{lat:dest.lat,lng:dest.lng}])
+    .then(route=>{
+      if(activeDestination!==dest)return; // destination changed/cleared while this was in flight
+      dest.routedKm=route.distanceKm;
+      dest.routedMin=route.durationMin;
+      drawRouteLine(route.geometry);
+      updateRouteBar();
+    })
+    .catch(()=>{ /* stay on the haversine estimate already shown by updateRouteBar() */ });
 }
 function updateRouteBar(){
   if(!activeDestination||!userLat)return;
-  const km=haversine(userLat,userLng,activeDestination.lat,activeDestination.lng);
   document.getElementById('routeDestLabel').textContent=activeDestination.label;
-  document.getElementById('routeKm').textContent=km.toFixed(0)+' km';
-  document.getElementById('routeMin').textContent=estMinutes(km)+' min';
+  if(activeDestination.routedKm!=null){
+    document.getElementById('routeKm').textContent=activeDestination.routedKm.toFixed(0)+' km';
+    document.getElementById('routeMin').textContent=Math.round(activeDestination.routedMin)+' min';
+  } else {
+    const km=haversine(userLat,userLng,activeDestination.lat,activeDestination.lng);
+    document.getElementById('routeKm').textContent='~'+km.toFixed(0)+' km';
+    document.getElementById('routeMin').textContent='~'+estMinutes(km)+' min';
+  }
 }
 
 /* ROUTE PLANNER MODAL */
