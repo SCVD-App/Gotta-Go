@@ -343,6 +343,26 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
 /* ── TOAST ── */
 .toast{position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 18px;font-size:12px;color:var(--text);z-index:500;backdrop-filter:blur(20px);opacity:0;transition:opacity .3s;pointer-events:none;max-width:80vw;text-align:center;}
 
+/* ── TIER 2: DEVIATION / QUIET-MODE BUBBLE ── */
+.dev-bubble{position:fixed;top:140px;left:50%;transform:translateX(-50%);z-index:25;display:none;flex-direction:column;gap:9px;
+  width:min(340px,calc(100vw - 24px));background:var(--card2);border:1px solid var(--amber);border-radius:18px;
+  padding:13px 14px;backdrop-filter:blur(16px);box-shadow:0 6px 28px rgba(0,0,0,.45);transition:opacity .8s ease;}
+.dev-bubble.show{display:flex;}
+.dev-title{font-family:'Clash Display',sans-serif;font-size:15px;font-weight:700;color:var(--text);}
+.dev-sub{font-size:11px;color:var(--text-dim);line-height:1.45;}
+.dev-btns{display:flex;gap:8px;}
+.dev-btn{flex:1;border:none;border-radius:12px;padding:12px 8px;font-family:'Clash Display',sans-serif;font-size:15px;font-weight:700;cursor:pointer;}
+.dev-btn:active{transform:scale(.96);}
+.dev-btn.shh{background:var(--amber);color:var(--bg);}
+.dev-btn.reroute{background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--border2);}
+.dev-btn.ok{background:var(--teal);color:var(--bg);}
+
+/* ── FACILITY FILTER CHIPS (Nearby list) ── */
+.chip-row{display:flex;gap:6px;padding:0 18px 10px;flex-wrap:wrap;}
+.chip{font-size:11px;font-weight:600;padding:6px 11px;border-radius:14px;background:var(--card);border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;}
+.chip.on{background:var(--teal-ghost);border-color:var(--teal);color:var(--teal);}
+.empty-list{padding:26px 18px;text-align:center;font-size:12px;color:var(--text-dim);}
+
 /* ── LANDSCAPE (phone mounted sideways — e.g. Scott's Jag can only mount landscape) ──
    Everything above was sized for a tall portrait screen: topbar + GPS bar + turn banner stacked
    at the top, route bar + nearest card + Sonar wedge + bottom nav stacked at the bottom. On a
@@ -358,6 +378,10 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
   .turn-instruction{font-size:12px;}
   .turn-distance{font-size:10px;}
   .turn-recalc{width:28px;height:28px;font-size:14px;}
+  .dev-bubble{top:90px;padding:8px 12px;gap:6px;width:min(420px,calc(100vw - 24px));}
+  .dev-title{font-size:13px;}
+  .dev-sub{font-size:10px;}
+  .dev-btn{padding:8px 8px;font-size:13px;}
 
   .bottom-chrome{padding:0 0 8px;}
   .route-bar{margin:0 12px 6px;padding:7px 12px;}
@@ -514,6 +538,7 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
       <div class="section-div-title">Nearby Facilities</div>
       <div class="section-div-count" id="listCount">— found</div>
     </div>
+    <div class="chip-row" id="listFilters"></div>
     <div class="scroll-area"><div id="facility-list"></div></div>
   </div>
 </div>
@@ -579,6 +604,13 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
     <div class="turn-distance" id="turnDistance">—</div>
   </div>
   <button class="turn-recalc" id="turnRecalcBtn" onclick="refreshDirectRoute()" title="Recalculate from here">🔄</button>
+</div>
+
+<!-- TIER 2: DEVIATION / QUIET-MODE BUBBLE (hidden until you leave the planned route) -->
+<div class="dev-bubble" id="devBubble">
+  <div class="dev-title" id="devTitle">—</div>
+  <div class="dev-sub" id="devSub">—</div>
+  <div class="dev-btns" id="devBtns"></div>
 </div>
 
 <!-- BOTTOM CHROME -->
@@ -980,7 +1012,7 @@ function progressAlongRoute(coords,lat,lng){
 function planTurnByTurn(dest){
   lastSpokenStepIndex=-1;
   if(dest.steps&&dest.steps.length){
-    speakStep(dest.steps[0]);
+    if(devState==='none')speakStep(dest.steps[0]); // quiet mode / deviation prompt keeps the voice shut
     lastSpokenStepIndex=0;
     requestNavWakeLock();
   }
@@ -992,7 +1024,7 @@ function updateTurnBanner(){
   const banner=document.getElementById('turnBanner');
   if(!banner)return;
   const dest=activeDestination;
-  if(!dest||!dest.steps||!dest.steps.length||!dest.routeCoords||!userLat){
+  if(!dest||!dest.steps||!dest.steps.length||!dest.routeCoords||!userLat||devState!=='none'){
     banner.style.display='none';
     stopAutoNavFlash();
     return;
@@ -1015,6 +1047,168 @@ function updateTurnBanner(){
   updateAutoNavFlash(m.modifier,distKm);
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   TIER 2 — "Sshhhh!!!" deviation / quiet mode (designed 16 Sep 2026)
+   When GPS shows you've left the planned route for real, a bubble asks what's going on instead of
+   Waze-style panic-rerouting:
+     • Sshhhh!!!   → deliberate detour. Voice, banner and nav flash all go quiet. A fresh route
+                     back to the destination is quietly recalculated in the background and stays
+                     drawn on the map. The "It's ok now" bubble fades to 50%, steps back up to full
+                     if you sit still ~7 min (fuel stop benchmark), and never times out otherwise
+                     (a kids' loo/food stop can easily run 40 min). Rejoin the original route on
+                     your own and everything resumes automatically.
+     • Reroute me  → genuine wrong turn: recalculates and resumes full voice guidance immediately.
+   Nothing here ever auto-reroutes — the bubble waits for you.
+   ═══════════════════════════════════════════════════════════════ */
+const OFF_ROUTE_MIN_KM=0.15;        // beyond this from the route line = off route (widened if GPS accuracy is poor)
+const OFF_ROUTE_TICKS=3;            // consecutive off-route GPS fixes needed…
+const OFF_ROUTE_MIN_MS=5000;        // …spread over at least this long, so a GPS jump or a car park can't trigger it
+const REJOIN_MIN_KM=0.06;           // within this of the ORIGINAL route = back on it
+const REJOIN_TICKS=2;
+const QUIET_STATIONARY_MS=7*60*1000;
+const STATIONARY_RADIUS_KM=0.04;
+const QUIET_RECALC_MIN_MS=20000;    // background recalc rate limit…
+const QUIET_RECALC_MIN_KM=0.25;     // …and it only refires after you've moved this far
+const QUIET_CACHE_MAX_KM=0.3;       // "It's ok now" reuses the background route if you haven't moved beyond this since
+
+let devState='none';                // 'none' | 'prompt' | 'quiet'
+let devOffCount=0,devOffSince=0,devOnCount=0,lastAccM=20;
+function freshQuiet(){return {route:null,fetchedAt:0,fetchLat:null,fetchLng:null,fetching:false,anchorLat:null,anchorLng:null,anchorAt:0,boosted:false,timer:null};}
+let quiet=freshQuiet();
+function nowMs(){return Date.now();}
+
+/* True point-to-segment distance to the route line (km). Deliberately NOT the sampled
+   nearest-vertex check progressAlongRoute() uses — on a long route the vertices can be hundreds
+   of metres apart, which would read as "off route" while you're sitting right on the road. */
+function distToRouteKm(coords,lat,lng){
+  if(!coords||coords.length<2)return null;
+  const kx=111.32*Math.cos(lat*Math.PI/180),ky=110.574;
+  const px=lng*kx,py=lat*ky;
+  let best=Infinity,ax=coords[0][0]*kx,ay=coords[0][1]*ky;
+  for(let i=1;i<coords.length;i++){
+    const bx=coords[i][0]*kx,by=coords[i][1]*ky;
+    const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
+    let t=l2?((px-ax)*dx+(py-ay)*dy)/l2:0;
+    t=t<0?0:t>1?1:t;
+    const d=Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
+    if(d<best)best=d;
+    ax=bx;ay=by;
+  }
+  return best;
+}
+
+/* Called on every GPS fix, before the turn banner. */
+function trackDeviation(){
+  const dest=activeDestination;
+  if(!dest||!dest.routeCoords||!userLat){if(devState!=='none')endDeviation();return;}
+  const d=distToRouteKm(dest.routeCoords,userLat,userLng);
+  if(d===null)return;
+  const t=nowMs();
+  if(devState==='none'){
+    if(d>Math.max(OFF_ROUTE_MIN_KM,2*lastAccM/1000)){
+      if(!devOffCount)devOffSince=t;
+      devOffCount++;
+      if(devOffCount>=OFF_ROUTE_TICKS&&t-devOffSince>=OFF_ROUTE_MIN_MS)showDeviationPrompt();
+    } else devOffCount=0;
+    return;
+  }
+  // prompt or quiet: did you rejoin the original route on your own?
+  if(d<=Math.max(REJOIN_MIN_KM,lastAccM/1000)){if(++devOnCount>=REJOIN_TICKS){rejoinRoute();return;}}
+  else devOnCount=0;
+  if(devState==='quiet')quietTick();
+}
+
+function showDeviationPrompt(){
+  devState='prompt';devOnCount=0;
+  try{speechSynthesis.cancel();}catch(e){}
+  stopAutoNavFlash();
+  document.getElementById('turnBanner').style.display='none';
+  renderDevBubble();
+}
+function chooseQuiet(){
+  if(devState!=='prompt')return;
+  devState='quiet';devOnCount=0;
+  quiet=freshQuiet();
+  quiet.anchorLat=userLat;quiet.anchorLng=userLng;quiet.anchorAt=nowMs();
+  quiet.timer=setInterval(quietStationaryCheck,15000);
+  renderDevBubble();
+  fetchQuietRoute();
+}
+function rerouteNow(){
+  if(devState==='none')return;
+  endDeviation();
+  refreshDirectRoute(); // planTurnByTurn() speaks the first instruction of the fresh route
+}
+function resumeFromQuiet(){
+  if(devState!=='quiet')return;
+  const dest=activeDestination,qr=quiet.route;
+  const fresh=dest&&qr&&!dest.viaStop&&quiet.fetchLat!=null&&userLat&&haversine(quiet.fetchLat,quiet.fetchLng,userLat,userLng)<=QUIET_CACHE_MAX_KM;
+  endDeviation();
+  if(!dest)return;
+  if(fresh){applyRoute(dest,qr);planTurnByTurn(dest);if(dest.longHaul)planDumpStops(dest,qr.geometry);} // instant — it was ready and waiting
+  else refreshDirectRoute();
+}
+function rejoinRoute(){
+  const dest=activeDestination;
+  endDeviation();
+  if(dest&&dest.routeGeom)drawRouteLine(dest.routeGeom); // put the original line back
+  lastSpokenStepIndex=-1;                                // so the current step is read out again
+  updateRouteBar();
+  toast('Back on route');
+}
+function endDeviation(){
+  devState='none';devOffCount=0;devOnCount=0;
+  if(quiet.timer)clearInterval(quiet.timer);
+  quiet=freshQuiet();
+  renderDevBubble();
+}
+
+function quietTick(){
+  const t=nowMs();
+  if(haversine(quiet.anchorLat,quiet.anchorLng,userLat,userLng)>Math.max(STATIONARY_RADIUS_KM,lastAccM/1000)){
+    quiet.anchorLat=userLat;quiet.anchorLng=userLng;quiet.anchorAt=t; // you moved — reset the sitting-still clock
+  }
+  if(!quiet.fetching&&t-quiet.fetchedAt>=QUIET_RECALC_MIN_MS&&(quiet.fetchLat==null||haversine(quiet.fetchLat,quiet.fetchLng,userLat,userLng)>=QUIET_RECALC_MIN_KM))fetchQuietRoute();
+}
+function quietStationaryCheck(){
+  if(devState!=='quiet'||quiet.boosted)return;
+  if(nowMs()-quiet.anchorAt>=QUIET_STATIONARY_MS){quiet.boosted=true;renderDevBubble();} // stays raised once triggered
+}
+function fetchQuietRoute(){
+  const dest=activeDestination;
+  if(!dest||!userLat||quiet.fetching)return;
+  quiet.fetching=true;
+  const fromLat=userLat,fromLng=userLng,stamp=nowMs();
+  fetchRoute([{lat:fromLat,lng:fromLng},{lat:dest.lat,lng:dest.lng}])
+    .then(route=>{
+      quiet.fetching=false;
+      if(devState!=='quiet'||activeDestination!==dest)return; // state moved on while this was in flight
+      quiet.route=route;quiet.fetchedAt=stamp;quiet.fetchLat=fromLat;quiet.fetchLng=fromLng;
+      drawRouteLine(route.geometry);                           // the way back stays visibly on the map
+      updateRouteBar();                                        // and the ETA reflects it
+    })
+    .catch(()=>{quiet.fetching=false;quiet.fetchedAt=stamp;}); // back off; retried after the min interval
+}
+
+function renderDevBubble(){
+  const b=document.getElementById('devBubble');
+  if(!b)return;
+  if(devState==='none'){b.classList.remove('show');b.style.opacity='1';return;}
+  const title=document.getElementById('devTitle'),sub=document.getElementById('devSub'),btns=document.getElementById('devBtns');
+  if(devState==='prompt'){
+    title.textContent="Off the route?";
+    sub.textContent="Deliberate detour? I'll keep quiet and have the way back ready. Wrong turn? I'll reroute straight away.";
+    btns.innerHTML='<button class="dev-btn shh" onclick="chooseQuiet()">Sshhhh!!!</button><button class="dev-btn reroute" onclick="rerouteNow()">Reroute me</button>';
+    b.style.opacity='1';
+  } else {
+    title.textContent="Quiet mode — take your time";
+    sub.textContent="Route back to "+((activeDestination&&activeDestination.label)||'your destination')+" is ready when you are.";
+    btns.innerHTML='<button class="dev-btn ok" onclick="resumeFromQuiet()">It\'s ok now</button>';
+    b.style.opacity=quiet.boosted?'1':'0.5';
+  }
+  b.classList.add('show');
+}
+
 function haversine(a,b,c,d){const R=6371,dL=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;const x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dl/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
 function estMinutes(km){return Math.max(1,Math.round(km*1.5));}
 function lordsLabel(stars){if(stars>=5)return '🏛️ House of Lords';if(stars===4)return '👑 Throne Room';if(stars===3)return '🚻 The Loo';if(stars===2)return '⛽ Servo Stop';return '⚠️ Thunderbox';}
@@ -1029,6 +1223,7 @@ function requestGPS(){
 function onGPS(p){
   userLat=p.coords.latitude;userLng=p.coords.longitude;
   const acc=Math.round(p.coords.accuracy);
+  lastAccM=acc||20;
   document.getElementById('gpsDot').className='gps-dot locked';
   document.getElementById('gpsText').innerHTML=`<strong>GPS Locked</strong> · ${userLat.toFixed(5)}, ${userLng.toFixed(5)}`;
   document.getElementById('gpsAcc').textContent=`±${acc}m`;
@@ -1043,7 +1238,9 @@ function onGPS(p){
   else userMarker=L.marker([userLat,userLng],{icon:userMarkerIcon()}).addTo(map);
   updateDistances();updateNearestCard();
   if(activeDestination)updateRouteBar();
-  updateTurnBanner();
+  trackDeviation();
+  if(devState==='none')updateTurnBanner();
+  else{document.getElementById('turnBanner').style.display='none';stopAutoNavFlash();}
 }
 function onGPSErr(){document.getElementById('gpsDot').className='gps-dot error';startDemo();}
 function startDemo(){
@@ -1074,7 +1271,7 @@ function plotMarkers(){
   markers.forEach(m=>map.removeLayer(m));markers=[];
   GOV_FACILITIES.forEach(f=>{
     const color=f.h24?'#00FFD1':f.stars>=4?'#00B894':'#7BA89E';
-    const m=L.marker([f.lat,f.lng],{icon:L.divIcon({className:'',html:`<div style="background:rgba(18,30,26,.92);border:1px solid ${color}40;border-radius:8px;padding:3px 7px;display:flex;align-items:center;gap:3px;font-size:10px;color:${color};white-space:nowrap;backdrop-filter:blur(8px);box-shadow:0 3px 10px rgba(0,0,0,.4);"><span style="font-size:12px;">🚻</span><span style="font-weight:600;">${f.dist!==undefined?f.dist.toFixed(1)+'km':''}</span></div>`,iconAnchor:[0,0]})}).addTo(map);
+    const m=L.marker([f.lat,f.lng],{icon:L.divIcon({className:'',html:`<div style="background:rgba(18,30,26,.92);border:1px solid ${color}40;border-radius:8px;padding:3px 7px;display:flex;align-items:center;gap:3px;font-size:10px;color:${color};white-space:nowrap;backdrop-filter:blur(8px);box-shadow:0 3px 10px rgba(0,0,0,.4);"><span style="font-size:12px;">🚻</span><span style="font-weight:600;">${f.dist!==undefined?f.dist.toFixed(1)+'km':''}</span>${f.shower?'<span style="font-size:11px;">🚿</span>':''}</div>`,iconAnchor:[0,0]})}).addTo(map);
     m.on('click',()=>openDetail(f));markers.push(m);
   });
 }
@@ -1298,6 +1495,7 @@ function setDestination(dest){
 function clearDestination(){
   activeDestination=null;
   navStepIndex=0;lastSpokenStepIndex=-1;
+  endDeviation();
   releaseNavWakeLock();
   stopAutoNavFlash();
   try{localStorage.removeItem('gottago_destination');}catch(e){}
@@ -1331,6 +1529,19 @@ function drawRouteLine(geometry){
 /* Real routed distance/time for the direct user→destination leg — fetched once per
    destination set/restore, never on every GPS tick, to keep Directions API usage in check
    (see gottago-relocation-scope.md). Falls back to the haversine estimate on failure. */
+/* Makes `route` the live route: stats, step data, geometry (kept as routeGeom so a rejoin can
+   redraw it), line on the map. Shared by the normal fetch and Tier 2's "It's ok now". */
+function applyRoute(dest,route){
+  dest.routedKm=route.distanceKm;
+  dest.routedMin=route.durationMin;
+  dest.steps=route.steps;
+  dest.routeCoords=route.geometry.coordinates;
+  dest.routeGeom=route.geometry;
+  dest.stepBoundaries=computeStepBoundaries(route.steps);
+  devOffCount=0;
+  drawRouteLine(route.geometry);
+  updateRouteBar();
+}
 function refreshDirectRoute(){
   if(!activeDestination||!userLat)return;
   const dest=activeDestination;
@@ -1340,13 +1551,8 @@ function refreshDirectRoute(){
   fetchRoute(pts)
     .then(route=>{
       if(activeDestination!==dest)return; // destination changed/cleared while this was in flight
-      dest.routedKm=route.distanceKm;
-      dest.routedMin=route.durationMin;
-      dest.steps=route.steps;
-      dest.routeCoords=route.geometry.coordinates;
-      dest.stepBoundaries=computeStepBoundaries(route.steps);
-      drawRouteLine(route.geometry);
-      updateRouteBar();
+      if(devState!=='none')return;        // a stale reply mustn't clobber the quiet-mode route / prompt
+      applyRoute(dest,route);
       planTurnByTurn(dest);
       if(dest.longHaul)planDumpStops(dest,route.geometry);
     })
@@ -1355,7 +1561,10 @@ function refreshDirectRoute(){
 function updateRouteBar(){
   if(!activeDestination||!userLat)return;
   document.getElementById('routeDestLabel').textContent=activeDestination.viaStop?activeDestination.label+' · via '+activeDestination.viaStop.label:activeDestination.label;
-  if(activeDestination.routedKm!=null){
+  if(devState==='quiet'&&quiet.route){ // quiet mode: show the live way-back stats, i.e. the revised ETA
+    document.getElementById('routeKm').textContent=quiet.route.distanceKm.toFixed(0)+' km';
+    document.getElementById('routeMin').textContent=Math.round(quiet.route.durationMin)+' min';
+  } else if(activeDestination.routedKm!=null){
     document.getElementById('routeKm').textContent=activeDestination.routedKm.toFixed(0)+' km';
     document.getElementById('routeMin').textContent=Math.round(activeDestination.routedMin)+' min';
   } else {
@@ -1414,10 +1623,18 @@ function startRoute(){
 }
 
 /* NEARBY LIST MODAL */
+/* Filter chips on the Nearby list — showers added 15 Oct 2026 (Skeeny's suggestion). They're a
+   filter on the existing facility search, not a new mode. */
+const LIST_FILTERS=[{k:'all',l:'All'},{k:'shower',l:'🚿 Showers'},{k:'accessible',l:'♿ Accessible'},{k:'baby',l:'👶 Baby change'}];
+let listFilter='all';
+function setListFilter(k){listFilter=k;buildFacilityList();}
 function buildFacilityList(){
   updateDistances();
-  const sorted=[...GOV_FACILITIES].sort((a,b)=>a.dist-b.dist);
+  const all=[...GOV_FACILITIES].sort((a,b)=>a.dist-b.dist);
+  const sorted=listFilter==='all'?all:all.filter(f=>f[listFilter]);
+  document.getElementById('listFilters').innerHTML=LIST_FILTERS.map(c=>`<div class="chip ${c.k===listFilter?'on':''}" onclick="setListFilter('${c.k}')">${c.l}</div>`).join('');
   document.getElementById('listCount').textContent=sorted.length+' found';
+  if(!sorted.length){document.getElementById('facility-list').innerHTML='<div class="empty-list">Nothing matching that in the current facility data.</div>';return;}
   document.getElementById('facility-list').innerHTML=sorted.map(f=>`
     <div class="facility-item" onclick="closeAllModals();openDetail(GOV_FACILITIES.find(x=>x.id===${f.id}))">
       <div class="fi-icon" style="background:var(--teal-ghost);">🚻</div>
