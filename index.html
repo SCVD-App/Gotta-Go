@@ -8,7 +8,8 @@
 <meta name="description" content="Route-aware public toilet finder for road trips. Never be caught short.">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link href="https://fonts.googleapis.com/css2?family=Clash+Display:wght@500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=clash-display@500,600,700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -239,13 +240,65 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
 .ds-go{margin:0 18px 8px;background:linear-gradient(135deg,var(--teal-dim),var(--teal));color:var(--bg);border:none;border-radius:14px;padding:14px;font-family:'Clash Display',sans-serif;font-size:15px;font-weight:700;cursor:pointer;width:calc(100% - 36px);text-align:center;}
 .ds-rep{margin:0 18px 18px;background:rgba(255,255,255,.04);border:1px solid var(--border2);border-radius:12px;padding:11px;font-family:'Outfit',sans-serif;font-size:12px;color:var(--text-dim);cursor:pointer;width:calc(100% - 36px);text-align:center;}
 
-/* ── PERMISSION SCREEN ── */
-.perm-screen{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:36px;text-align:center;}
-.ps-icon{font-size:58px;}
-.ps-title{font-family:'Clash Display',sans-serif;font-size:24px;font-weight:700;color:var(--text);}
-.ps-sub{font-size:13px;color:var(--text-dim);line-height:1.6;max-width:270px;}
-.ps-btn{background:linear-gradient(135deg,var(--teal-dim),var(--teal));color:var(--bg);border:none;border-radius:14px;padding:14px 28px;font-family:'Clash Display',sans-serif;font-size:16px;font-weight:700;cursor:pointer;}
-.ps-skip{font-size:11px;color:var(--text-dim);cursor:pointer;text-decoration:underline;}
+/* ── WELCOME / PERMISSION SCREEN ──
+   One memorable thing: a sonar sweep that lights up loo "blips" as it passes (the app's whole
+   idea in one picture). Its four red compass ticks echo the logo. Everything else stays quiet. */
+.perm-screen{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:clamp(14px,3vh,28px);padding:24px 28px;text-align:center;overflow-y:auto;
+  background:radial-gradient(ellipse 90% 48% at 50% 25%,rgba(0,255,209,.13),transparent 70%),var(--bg);
+  animation:ps-fade .7s ease-out both;}
+@keyframes ps-fade{from{opacity:0}to{opacity:1}}
+.ps-radar{position:relative;width:clamp(190px,34vh,300px);aspect-ratio:1;flex-shrink:0;}
+.ps-radar svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+.ps-sweep{position:absolute;inset:2%;border-radius:50%;
+  background:conic-gradient(from 0deg,transparent 0deg,transparent 270deg,rgba(0,255,209,.28) 359deg,rgba(0,255,209,.8) 360deg);
+  animation:ps-spin 4s linear infinite;}
+@keyframes ps-spin{to{transform:rotate(360deg)}}
+.ps-radar .rg{fill:none;stroke:var(--teal);stroke-opacity:.16;stroke-width:1;}
+.ps-radar .ticks path{fill:none;stroke:var(--red);stroke-width:3;stroke-linecap:round;}
+.ps-radar .blip circle{fill:var(--teal);transform-box:fill-box;transform-origin:center;opacity:.18;
+  filter:drop-shadow(0 0 3px var(--teal-glow));
+  animation:ps-blip 4s linear infinite;animation-delay:calc(var(--a) / 360 * 4s);}
+.ps-radar .blip circle.halo{fill:none;stroke:var(--teal);stroke-width:1.2;filter:none;opacity:0;
+  animation-name:ps-halo;}
+@keyframes ps-blip{0%{opacity:1;transform:scale(1.7)}6%{opacity:1;transform:scale(1)}65%{opacity:.18;transform:scale(1)}100%{opacity:.18;transform:scale(1)}}
+@keyframes ps-halo{0%{opacity:.9;transform:scale(1)}30%{opacity:0;transform:scale(4.5)}100%{opacity:0;transform:scale(4.5)}}
+.ps-mark{position:absolute;left:50%;top:50%;width:30%;aspect-ratio:1;transform:translate(-50%,-50%);z-index:2;
+  border-radius:22%;overflow:hidden;background:#0c1412;
+  box-shadow:0 0 0 1px rgba(0,255,209,.3),0 0 34px var(--teal-glow),0 8px 24px rgba(0,0,0,.5);}
+.ps-mark img{display:block;width:100%;height:100%;object-fit:cover;}
+.ps-mark-fb{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-family:'Clash Display','Outfit',sans-serif;font-weight:700;font-size:26px;color:var(--teal);}
+.ps-text{display:flex;flex-direction:column;align-items:center;gap:clamp(10px,2vh,16px);}
+.ps-brand{font-family:'Clash Display','Outfit',sans-serif;font-size:clamp(34px,5.4vh,44px);font-weight:700;letter-spacing:-1px;line-height:1;color:var(--text);}
+.ps-tag{font-size:15px;color:var(--text-dim);margin-top:-4px;}
+.ps-body{font-size:13px;color:var(--text-dim);line-height:1.6;max-width:290px;}
+.ps-voice{max-width:280px;}
+.ps-voice-q{font-size:12px;font-style:italic;color:var(--teal-dim);line-height:1.5;}
+.ps-voice-who{font-size:11px;color:var(--text-ghost);margin-top:3px;}
+.ps-actions{display:flex;flex-direction:column;align-items:center;gap:10px;width:min(300px,100%);margin-top:4px;}
+.ps-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;width:100%;
+  background:linear-gradient(135deg,var(--teal-dim),var(--teal));color:var(--bg);border:none;border-radius:14px;padding:15px 24px;
+  font-family:'Clash Display','Outfit',sans-serif;font-size:16px;font-weight:700;cursor:pointer;
+  box-shadow:0 8px 28px rgba(0,184,148,.3);transition:transform .15s;}
+.ps-btn:active{transform:scale(.97);}
+.ps-btn svg{width:20px;height:20px;flex-shrink:0;}
+.ps-skip{background:none;border:1px solid var(--border2);color:var(--text-dim);border-radius:14px;padding:11px 20px;
+  font-family:'Outfit',sans-serif;font-size:12px;cursor:pointer;}
+.ps-btn:focus-visible,.ps-skip:focus-visible{outline:2px solid var(--teal);outline-offset:3px;}
+.ps-fine{font-size:10px;color:var(--text-ghost);line-height:1.5;max-width:270px;}
+@media (orientation:landscape) and (max-height:500px){
+  .perm-screen{flex-direction:row;gap:36px;padding:14px 32px;}
+  .ps-radar{width:min(220px,72vh);}
+  .ps-voice{display:none;}
+  .ps-body{max-width:320px;}
+}
+@media (prefers-reduced-motion:reduce){
+  .perm-screen{animation:none;}
+  .ps-sweep{animation:none;}
+  .ps-radar .blip circle{animation:none;opacity:.85;}
+  .ps-radar .blip circle.halo{opacity:0;}
+}
 
 /* ══ MODALS (Route Planner / Nearby list / Avatar) — new ══ */
 .modal-overlay{position:fixed;inset:0;z-index:100;background:rgba(6,10,9,.85);backdrop-filter:blur(8px);display:none;align-items:flex-end;}
@@ -415,13 +468,39 @@ body{font-family:'Outfit',sans-serif;color:var(--text);}
 <div class="nav-flash starboard" id="starboardFlash"></div>
 <div class="grain"></div>
 
-<!-- PERMISSION -->
+<!-- WELCOME / PERMISSION -->
 <div class="perm-screen" id="permScreen">
-  <div class="ps-icon">📍</div>
-  <div class="ps-title">GottaGo needs your location</div>
-  <div class="ps-sub">To find real nearby facilities from the Australian Government's National Public Toilet Map.</div>
-  <button class="ps-btn" onclick="requestGPS()">📡 Enable GPS</button>
-  <div class="ps-skip" onclick="startDemo()">Use demo mode (Brisbane CBD)</div>
+  <div class="ps-radar" aria-hidden="true">
+    <div class="ps-sweep"></div>
+    <svg viewBox="0 0 200 200">
+      <circle class="rg" cx="100" cy="100" r="96"/>
+      <circle class="rg" cx="100" cy="100" r="68"/>
+      <circle class="rg" cx="100" cy="100" r="40"/>
+      <g class="ticks"><path d="M100 1v11M100 188v11M1 100h11M188 100h11"/></g>
+      <g class="blip" style="--a:40"><circle cx="139.9" cy="52.5" r="3.4"/><circle class="halo" cx="139.9" cy="52.5" r="3.4"/></g>
+      <g class="blip" style="--a:95"><circle cx="143.8" cy="103.8" r="3.4"/><circle class="halo" cx="143.8" cy="103.8" r="3.4"/></g>
+      <g class="blip" style="--a:150"><circle cx="135" cy="160.6" r="3.4"/><circle class="halo" cx="135" cy="160.6" r="3.4"/></g>
+      <g class="blip" style="--a:215"><circle cx="71.3" cy="141" r="3.4"/><circle class="halo" cx="71.3" cy="141" r="3.4"/></g>
+      <g class="blip" style="--a:285"><circle cx="36.2" cy="82.9" r="3.4"/><circle class="halo" cx="36.2" cy="82.9" r="3.4"/></g>
+    </svg>
+    <div class="ps-mark"><span class="ps-mark-fb">GG</span><img src="icon-192.png" alt="" onerror="this.style.display='none'"></div>
+  </div>
+  <div class="ps-text">
+    <div>
+      <div class="ps-brand">GottaGo</div>
+      <div class="ps-tag">Never be caught short.</div>
+    </div>
+    <div class="ps-body">Finds public toilets near you and along your route. To do that, GottaGo needs your location.</div>
+    <div class="ps-voice"><div class="ps-voice-q" id="psQuote"></div><div class="ps-voice-who" id="psQuoteWho"></div></div>
+    <div class="ps-actions">
+      <button class="ps-btn" onclick="requestGPS()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></svg>
+        Enable GPS
+      </button>
+      <button class="ps-skip" onclick="startDemo()">Try demo mode (Brisbane CBD)</button>
+    </div>
+    <div class="ps-fine">Facility data: Australian Government National Public Toilet Map (data.gov.au)</div>
+  </div>
 </div>
 
 <!-- MAP -->
@@ -1868,6 +1947,9 @@ setProx(0.2);
   try{const si=localStorage.getItem('gottago_mapicon');if(si!==null)currentMapIcon=parseInt(si,10)||0;}catch(e){}
   try{const sn=localStorage.getItem('gottago_navlights_auto');if(sn!==null){navLightsAuto=sn==='1';document.getElementById('navLightsAutoToggle').classList.toggle('on',navLightsAuto);}}catch(e){}
   buildAvatarList();buildRouteAvatarGrid();buildMapIconGrid();
+  // Welcome screen: one of the voice guides, picked at random each open (no extra motion)
+  const wq=document.getElementById('psQuote'),ww=document.getElementById('psQuoteWho');
+  if(wq&&ww){const av=AVATARS[Math.floor(Math.random()*AVATARS.length)];wq.textContent=av.sample;ww.textContent='— '+av.name+', one of six voice guides';}
 })();
 </script>
 </body>
